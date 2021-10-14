@@ -1,0 +1,179 @@
+"""
+成立备案校验小程序
+"""
+import numpy as np
+import pandas as pd
+from decimal import Decimal
+
+import time
+time1=time.time()
+
+import os.path
+
+from pdfminer.pdfparser import PDFParser
+from pdfminer.pdfdocument import PDFDocument
+from pdfminer.pdfinterp import PDFResourceManager, PDFPageInterpreter
+from pdfminer.converter import PDFPageAggregator
+from pdfminer.layout import LTTextBoxHorizontal,LAParams
+from pdfminer.pdfpage import PDFTextExtractionNotAllowed, PDFPage
+
+class CPdf2TxtManager():
+    
+    def __init__(self, filePath, excelPath):
+        self.filePath = filePath
+        self.excelPath = excelPath
+        self.exceldata = pd.read_excel(self.excelPath, header = 0)
+    
+    # 格式转换——PDF转TxT
+    def changePdfToText(self):
+        # 以二进制读模式打开
+        file = open(self.filePath, 'rb')
+        # 用文件对象来创建一个pdf文档分析器
+        praser = PDFParser(file)
+        # 创建一个PDF文档对象储存文档结构，提供密码初始化（若有）
+        doc = PDFDocument(praser, password = '')
+        # 检查文件是否允许文本读取
+        if not doc.is_extractable:
+            raise PDFTextExtractionNotAllowed
+        # 创建PDF资源管理器来管理共享资源
+        rsrcmgr = PDFResourceManager(caching = False)
+        # 创建一个PDF设备对象
+        laparams = LAParams()
+        # 创建一个PDF页面聚合对象
+        device = PDFPageAggregator(rsrcmgr, laparams=laparams)
+        # 创建一个PDF解释器对象
+        interpreter = PDFPageInterpreter(rsrcmgr, device)
+        # 获得PDF的页面列表
+        print(PDFPage.get_pages(doc))
+        # 循环遍历列表，每次处理一个page的内容
+        result = []
+        for page in PDFPage.create_pages(doc):
+            # 解析读取单独页数
+            interpreter.process_page(page)
+            # 接受该页面的LTPage对象
+            layout = device.get_result()
+            for x in layout:
+                if hasattr(x, "get_text"):
+                    result.append(x.get_text())
+                    fileNames = os.path.splitext(self.filePath)
+                    with open(fileNames[0] + '.txt','wb') as f:
+                        results = x.get_text()
+                        print(results)
+                        f.write(str.encode(results + '\n'))
+        return result
+    
+    # 字段识别并转换
+    def id_transform(self):
+        txt_list = self.changePdfToText()
+        # 申请报告抬头部分的检索
+        txt_title_list = []
+        for i in range(len(txt_list)):
+            if "中国证监会证券基金机构监管部" not in txt_list[i]:
+                txt_title_list.append(txt_list[i])
+            else:
+                num = i
+                break
+        txt_title_str = "".join(txt_title_list).replace('\n', '').replace(' ','').replace(',','')
+        # 基金管理人字段
+        fund_mgt_name = txt_title_str[:10]
+        # 基金成立申请报告文号
+        id_start, id_end = txt_title_str.find("富",1), txt_title_str.find("号")
+        fund_report_number = txt_title_str[id_start:id_end+1]
+        # 基金成立申请报告名称
+        id_start = txt_title_str.find("关")
+        fund_report_name = txt_title_str[id_start:]
+        # 基金名称
+        id_start = fund_report_name.find("富")
+        fund_name = fund_report_name[id_start:-5]
+        
+        # 申请报告正文部分的检索
+        txt_content_list = []
+        for i in range(num, len(txt_list)):
+            if "妥否，请批示" not in txt_list[i]:
+                txt_content_list.append(txt_list[i])
+            else:
+                break
+        txt_content_str = "".join(txt_content_list).replace('\n', '').replace(' ','')
+        # 基金募集规模
+        if "上述两部分" not in txt_content_str: # 非ETF基金募集规模
+             id_start, id_end = txt_content_str.find("共计", txt_content_str.find("以上")), txt_content_str.find("元",txt_content_str.find("共计"))
+             fund_size = '%.2f' % round((float(txt_content_str[id_start+5:id_end].replace(',',''))/1e8),2) + "亿元"
+        elif "总额" in txt_content_str: # ETF基金募集规模
+             id_start, id_end = txt_content_str.find("总额"), txt_content_str.find("元",txt_content_str.find("总额"))
+             fund_size = '%.2f' % round((float(txt_content_str[id_start+6:id_end].replace(',',''))/1e8),2) + "亿元"
+        # 基金持有人户数
+        id_start = txt_content_str.find("户数")
+        id_end = txt_content_str.find("户", id_start+1)
+        fund_holder_num = int(txt_content_str[id_start+4:id_end].replace(',',''))
+        # 发起式资金数量
+        if "发起式" not in fund_name:
+            sponsored_cpt = "无"
+        else:
+            sponsored_cpt = "1000万元"
+        # 从业人员、固有资金数量
+        if "未" in txt_content_str[:txt_content_str.find("固有资金")]:
+            employor_cpt = 0
+        else:
+            id_start = txt_content_str.find("基金份额", txt_content_str.find("固有资金"))
+            id_end = txt_content_str.find("份", id_start+4)
+            employor_cpt = float(txt_content_str[id_start+5:id_end].replace(',',''))
+            
+        if "未" in txt_content_str[txt_content_str.find("固有资金"):txt_content_str.find("安永华明",txt_content_str.find("固有资金"))]:
+            employee_cpt = 0
+        else:
+            id_start = txt_content_str.find("基金份额", txt_content_str.find("从业人员"))
+            id_end = txt_content_str.find("份", id_start+4)
+            employee_cpt = float(txt_content_str[id_start+5:id_end].replace(',',''))
+        mgt_cpt = '%.2f' % (employor_cpt + employee_cpt) + "元"
+        #机构持有人占比
+        '''
+        if "%" not in txt_content_str:
+            inst_pct = ''
+        else:
+            id_start = txt_content_str.find("总量", txt_content_str.find("持有份额"))
+            id_end = txt_content_str.find("，", id_start)
+            inst_pct = "%.2f%%" % (float((txt_content_str[id_start+3:id_end]).strip("%")))
+        '''
+        # 基金托管人信息无法从申请报告中抓取获得，有待进一步解决
+        fund_custodian = ''
+        
+        keyword = [fund_name, fund_mgt_name, fund_custodian, fund_report_name, fund_report_number,
+                   fund_size, fund_holder_num, sponsored_cpt, mgt_cpt]
+        
+        return keyword
+    
+    # 字段准确性校验
+    def check_excel(self):
+        data_fetch = self.id_transform()
+        df = self.exceldata.T
+        pct = df.loc["机构占比", 0]
+        df.loc["机构占比", 0] = "%.2f%%" % (pct*100)
+        df = df.rename(columns={0:"Excel数据"})
+        df["程序抓取"] = ''
+        for i in range(len(data_fetch)):
+            df.iloc[i, 1] = data_fetch[i]
+        df['数据校验结果'] = np.where(df["程序抓取"] == '', "待开发", np.where(df["Excel数据"] == df["程序抓取"], "准确", "有误"))
+        # pd.set_option('display.max_columns', None)
+        print(df)
+        if "有误" not in list(df["数据校验结果"]):
+            print("成立备案基本信息表信息准确！")
+        else:
+            print("成立备案基本信息表信息有误！")  
+        return df
+        
+
+if __name__ == '__main__':
+
+    pdfpath = u'D:/hrl/3-部门事务/11-成立备案校验/1-测试/备案请示.pdf'
+    excelpath = u'D:/hrl/3-部门事务/11-成立备案校验/1-测试/基本信息.xlsx'
+
+    pdf2TxtManager = CPdf2TxtManager(pdfpath, excelpath)
+    
+    # result = pdf2TxtManager.changePdfToText()
+    # para = pdf2TxtManager.id_transform()
+    result = pdf2TxtManager.check_excel()
+
+    time2 = time.time()
+
+    print('解析PDF结束!')
+    print('总共耗时：' + str(round(time2 - time1,4)) + 's')
